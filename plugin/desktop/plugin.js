@@ -429,15 +429,22 @@ function StatPage({ rest }) {
 
 /* ---------------- statusbar chip ---------------- */
 
+/* chip 文案：纯函数，便于冒烟测试用真实后端数据断言。
+   注意 /stats 的 totals 键是 total_estimated_cost（不是 estimated_cost，overview 里才叫 estimated_cost）——
+   取错键会让成本恒显示 $0。 */
+function todayChipLabel(totals, t) {
+  const o = totals || {}
+  const tk = (o.total_input || 0) + (o.total_output || 0)
+  const cost = o.total_estimated_cost != null ? o.total_estimated_cost : o.estimated_cost
+  return `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(cost)}`
+}
+
 function TodayChip({ rest }) {
   const t = usePluginI18n('hermes-stats')
   const s = useData(() => rest('/stats?days=1'), [], 5 * 60 * 1000)
   let label = t('loading')
   if (s.isError) label = t('error')
-  else if (s.data) {
-    const tk = (s.data.totals ? (s.data.totals.total_input || 0) + (s.data.totals.total_output || 0) : 0)
-    label = `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(s.data.totals ? s.data.totals.estimated_cost : 0)}`
-  }
+  else if (s.data) label = todayChipLabel(s.data.totals, t)
   return jsx('button', { className: 'hs-chip', onClick: () => host.navigate('/stats'), title: t('palette'), children: [label] })
 }
 
