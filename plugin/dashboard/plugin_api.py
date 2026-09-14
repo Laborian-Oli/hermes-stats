@@ -23,6 +23,98 @@ router = APIRouter()
 _MAX_DAYS = 365
 
 
+# --------------------------------------------------------------------------- fx
+# 成本单价以美元计价（DeepSeek 官方账单单位是 USD），前端展示统一换算成人民币。
+# 汇率来源依次尝试：ECB 参考汇率（frankfurter.dev）→ exchangerate-api（open.er-api.com）→ 兜底常数。
+# 结果缓存 12h（进程内 + ~/.hermes/cache/hermes-stats-fx.json）；接口全挂时沿用旧值并标 stale=true。
+
+_FX_TTL = 12 * 3600
+_FX_FALLBACK = 7.10
+_FX_SOURCES = (
+    ("ECB", "https://api.frankfurter.dev/v1/latest?base=USD&symbols=CNY"),
+    ("exchangerate-api", "https://open.er-api.com/v6/latest/USD"),
+)
+_fx_mem: dict = {"at": 0.0, "payload": None}
+
+
+def _fx_parse(source: str, data: dict) -> dict | None:
+    """从各家响应里取 USD→CNY 与其报价日；结构不符返回 None 换下一家。"""
+    try:
+        if source == "ECB":
+            rate, date = data["rates"]["CNY"], data.get("date")
+        else:
+            rate, date = data["rates"]["CNY"], (data.get("time_last_update_utc") or "")[:16]
+        rate = float(rate)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"usd_cny": rate, "source": source, "rate_date": date} if rate > 0 else None
+
+
+def _fx_disk_path() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home()) / "cache" / "hermes-stats-fx.json"
+
+
+def _fx_disk_read() -> dict | None:
+    try:
+        with open(_fx_disk_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and float(data.get("usd_cny") or 0) > 0 else None
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _fx_disk_write(payload: dict) -> None:
+    try:
+        path = _fx_disk_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError:
+        pass
+
+
+def _fx_fetch() -> dict | None:
+    try:
+        import httpx
+    except ImportError:
+        return None
+    for source, url in _FX_SOURCES:
+        try:
+            resp = httpx.get(url, timeout=8)
+            resp.raise_for_status()
+            got = _fx_parse(source, resp.json())
+            if got:
+                return got
+        except Exception:
+            continue
+    return None
+
+
+def _fx_rate() -> dict:
+    now = time.time()
+    cached = _fx_mem["payload"]
+    if cached and now - _fx_mem["at"] < _FX_TTL:
+        return cached
+    got = _fx_fetch()
+    if got:
+        payload = {**got, "fetched_at": now, "stale": False}
+        _fx_mem.update({"at": now, "payload": payload})
+        _fx_disk_write(payload)
+        return payload
+    old = _fx_mem["payload"] or _fx_disk_read()
+    if old:
+        return {**old, "stale": True}
+    return {
+        "usd_cny": _FX_FALLBACK,
+        "source": "fallback",
+        "rate_date": None,
+        "fetched_at": now,
+        "stale": True,
+    }
+
+
 # --------------------------------------------------------------------------- stats
 
 
@@ -40,6 +132,7 @@ def _stats_payload(days: int) -> dict:
     return {
         "days": days,
         "generated_at": time.time(),
+        "fx": _fx_rate(),
         "totals": raw["totals"],
         "daily": raw["daily"],
         "by_model": raw["by_model"],

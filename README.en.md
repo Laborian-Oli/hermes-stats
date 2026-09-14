@@ -25,6 +25,10 @@ Add a data-rich stats center to Hermes Desktop: a **Stats** sidebar page, persis
 - **Cache read is shown separately**, never folded into totals — under prompt caching it is re-read every turn and can dwarf everything else (typically 90%+ of the raw pipeline total)
 - The **input** trend chart uses a **log scale** (usage spans hundreds-fold; a linear axis collapses to an outlier-dominated flat line); output has its own linear scale
 - Cost `$0` means the model has no pricing data (data-source semantics, not a bug)
+- **All costs are shown in CNY (¥)**: the analytics pipeline prices in USD (official model rates); the backend converts with a USD→CNY rate before serving
+  - Rate sources: ECB reference rate (frankfurter.dev) → exchangerate-api fallback; cached 12h, and when the sources are unreachable the last known value is reused and labelled "缓存值"
+  - The `FX 1 USD = ¥x.xxxx` tag next to the "Sessions & cost" heading shows the rate actually used; with no source and no cache it falls back to the built-in 7.10
+  - A bank's FX selling rate differs from the ECB reference rate — this plugin uses the reference rate, for order-of-magnitude reading only
 
 ## Install
 

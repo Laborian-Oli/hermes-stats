@@ -96,11 +96,33 @@ function colors() {
   }
 }
 
+/* ---------------- 汇率（USD → CNY） ----------------
+ * 模型单价与后端统计都是美元口径，展示统一折人民币。汇率随 /stats 的 fx 字段下发
+ * （ECB 参考汇率 → exchangerate-api → 兜底常数，后端缓存 12h；stale 表示沿用旧值）。 */
+const FX_FALLBACK = 7.10
+let FX = { rate: FX_FALLBACK, source: 'fallback', date: null, stale: true }
+function applyFx(payload) {
+  const f = payload && payload.fx
+  if (f && f.usd_cny > 0) {
+    FX = { rate: f.usd_cny, source: f.source || '?', date: f.rate_date || null, stale: !!f.stale }
+  }
+  return FX
+}
+const Fx = { cn: '¥', fallback: '兜底', ecb: 'ECB', er: 'exchangerate-api' }
+function fxNoteText() {
+  const src = FX.source === 'ECB' ? Fx.ecb : FX.source === 'fallback' ? Fx.fallback : FX.source
+  return `1 USD = ${Fx.cn}${FX.rate.toFixed(4)} · ${src}${FX.date ? ' ' + FX.date : ''}${FX.stale ? ' · 缓存值' : ''}`
+}
+
 /* ---------------- formatting ---------------- */
 const fmtTokens = n => (n = n || 0) >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
   : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M'
   : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n)
-const fmtCost = n => (n = n || 0) >= 1 ? '$' + n.toFixed(2) : n > 0 ? '$' + n.toPrecision(2) : '$0'
+// 入参是美元估算值；rate 可显式传入（冒烟测试用），默认取当前汇率
+const fmtCost = (n, rate) => {
+  const v = (n || 0) * (rate != null ? rate : FX.rate)
+  return v >= 1 ? Fx.cn + v.toFixed(2) : v > 0 ? Fx.cn + v.toPrecision(2) : Fx.cn + '0'
+}
 const fmtInt = n => (n || 0).toLocaleString()
 const fmtDay = ts => ts ? new Date(ts * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '—'
 const shortDay = d => typeof d === 'string' ? d.slice(5) : ''
@@ -282,6 +304,7 @@ function StatPage({ rest }) {
     return jsx('div', { className: 'hs-root', children: jsx('div', { className: 'hs-box', children: '统计中心加载失败：请确认 config.yaml → plugins.enabled 含 hermes-stats 且已重启 Desktop（gateway）。' }) })
   }
   const stats = s.data, c = sys.data
+  applyFx(stats)
   const o = stats.overview || {}, a = stats.activity || {}
   if (!o.total_sessions) {
     return jsx('div', { className: 'hs-root', children: jsx('div', { className: 'hs-box', children: '当前时间窗口内暂无会话数据。' }) })
@@ -297,7 +320,7 @@ function StatPage({ rest }) {
     jsx(StatCard, { key: 'a', label: '会话', value: fmtInt(o.total_sessions), sub: o.user_messages ? `用户消息 ${fmtInt(o.user_messages)}` : null }),
     jsx(StatCard, { key: 'b', label: '消息', value: fmtInt(o.total_messages), sub: `平均 ${(o.avg_messages_per_session || 0).toFixed(1)}/会话` }),
     jsx(StatCard, { key: 'c', label: '总 Tokens', value: fmtTokens((o.total_input_tokens || 0) + (o.total_output_tokens || 0)), sub: `缓存读 ${fmtTokens(o.total_cache_read_tokens || 0)}` }),
-    jsx(StatCard, { key: 'd', label: '成本', value: fmtCost(o.estimated_cost), sub: o.unknown_cost_sessions ? `${o.unknown_cost_sessions} 会话无定价` : null }),
+    jsx(StatCard, { key: 'd', label: '成本（¥）', value: fmtCost(o.estimated_cost), sub: o.unknown_cost_sessions ? `${o.unknown_cost_sessions} 会话无定价` : null }),
     jsx(StatCard, { key: 'e', label: '工具调用', value: fmtInt(o.total_tool_calls), sub: stats.totals && stats.totals.total_api_calls != null ? `API 调用 ${fmtInt(stats.totals.total_api_calls)}` : null }),
     jsx(StatCard, { key: 'f', label: '活跃时长', value: (o.total_hours || 0).toFixed(1) + 'h', sub: a ? `活跃 ${a.active_days} 天 · 最长连续 ${a.max_streak} 天` : null }),
   ]
@@ -366,8 +389,8 @@ function StatPage({ rest }) {
     jsx(TwoCol, { key: 'g', a: jsx(Card, { title: '输出', children: jsx(OutputChart, { key: 'oc', daily: stats.daily || [] }) }), b: jsx(Card, { title: '缓存读（对数刻度）', children: jsx(CacheChart, { key: 'cc', daily: stats.daily || [] }) }) }),
   ]})
   const sec3 = jsx('div', { key: 's3', className: 'hs-sec', children: [
-    jsx('div', { key: 't', className: 'hs-sec-title', children: '会话与成本' }),
-    jsx(TwoCol, { key: 'g', a: jsx(Card, { title: '每天会话数', children: jsx(SessionsChart, { daily: stats.daily || [] }) }), b: jsx(Card, { title: '每天估算成本', children: jsx(CostChart, { daily: stats.daily || [] }) }) }),
+    jsx('div', { key: 't', className: 'hs-sec-title', children: ['会话与成本', jsx('span', { key: 'fx', className: 'hs-tag', children: `FX ${fxNoteText()}` })] }),
+    jsx(TwoCol, { key: 'g', a: jsx(Card, { title: '每天会话数', children: jsx(SessionsChart, { daily: stats.daily || [] }) }), b: jsx(Card, { title: '每天估算成本（¥）', children: jsx(CostChart, { daily: stats.daily || [] }) }) }),
   ]})
   const sec4 = jsx('div', { key: 's4', className: 'hs-sec', children: [
     jsx('div', { key: 't', className: 'hs-sec-title', children: '分布' }),
@@ -375,8 +398,8 @@ function StatPage({ rest }) {
       jsx(Card, { key: 'p', title: '平台 (Tokens)', children: jsx(Donut, { data: platforms, label: fmtTokens(totalTokens) }) }),
       jsx(Card, { key: 'm', title: '模型 (Tokens)', children: jsx(Donut, { data: models, label: fmtTokens(totalTokens) }) }),
     ]}),
-    jsx('div', { key: 'mc', style: { marginTop: 10 }, children: jsx(Card, { title: '模型成本', children: jsx('table', { className: 'hs-table', children: [
-      HeadRow(['模型', 'Tokens', '成本', '会话']),
+    jsx('div', { key: 'mc', style: { marginTop: 10 }, children: jsx(Card, { title: '模型成本（¥）', children: jsx('table', { className: 'hs-table', children: [
+      HeadRow(['模型', 'Tokens', '成本（¥）', '会话']),
       jsx('tbody', { key: 'b', children: modelRows }),
     ]}) }) }),
   ]})
@@ -415,7 +438,7 @@ function StatPage({ rest }) {
     jsx('div', { key: 't', className: 'hs-sec-title', children: '系统' }),
     jsx('div', { key: 'g', className: 'hs-grid', children: sysCards }),
   ]})
-  const note = jsx('div', { key: 'n', className: 'hs-note', children: t('note') })
+  const note = jsx('div', { key: 'n', className: 'hs-note', children: `${t('note')} 成本按人民币展示 · FX ${fxNoteText()}` })
 
   return jsx('div', { className: 'hs-root', children: [
     jsx('style', { key: 's', children: STYLE }),
@@ -430,13 +453,14 @@ function StatPage({ rest }) {
 /* ---------------- statusbar chip ---------------- */
 
 /* chip 文案：纯函数，便于冒烟测试用真实后端数据断言。
-   注意 /stats 的 totals 键是 total_estimated_cost（不是 estimated_cost，overview 里才叫 estimated_cost）——
-   取错键会让成本恒显示 $0。 */
-function todayChipLabel(totals, t) {
+   两个坑：① /stats 的 totals 键是 total_estimated_cost（estimated_cost 只出现在 overview/by_model/daily），
+   取错键会让成本恒显示 0；② 展示货币是人民币，但 totals 里的钱是美元口径，换算汇率来自模块级 FX
+   （由 applyFx 用 /stats 的 fx 字段刷新，测试时可显式传 rate）。 */
+function todayChipLabel(totals, t, rate) {
   const o = totals || {}
   const tk = (o.total_input || 0) + (o.total_output || 0)
   const cost = o.total_estimated_cost != null ? o.total_estimated_cost : o.estimated_cost
-  return `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(cost)}`
+  return `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(cost, rate)}`
 }
 
 function TodayChip({ rest }) {
@@ -444,7 +468,7 @@ function TodayChip({ rest }) {
   const s = useData(() => rest('/stats?days=1'), [], 5 * 60 * 1000)
   let label = t('loading')
   if (s.isError) label = t('error')
-  else if (s.data) label = todayChipLabel(s.data.totals, t)
+  else if (s.data) { applyFx(s.data); label = todayChipLabel(s.data.totals, t) }
   return jsx('button', { className: 'hs-chip', onClick: () => host.navigate('/stats'), title: t('palette'), children: [label] })
 }
 
