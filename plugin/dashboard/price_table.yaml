@@ -1,0 +1,209 @@
+# hermes-stats 价格表 —— 手写维护，允许 LLM 协助更新
+#
+# 单位一律 USD / 每百万 token（照抄官方文档原单位，避免换算错误）。
+# 页面按 USD→CNY 汇率折成人民币展示，折算逻辑在 plugin_api.py 的 _fx_* 函数。
+#
+# ── 怎么加一个模型 ───────────────────────────────────────
+# 1. 在 models: 下加一条，填 input / output / cache_read
+# 2. source 填官方定价页 URL，checked 填核对日期，confidence 按实际情况选
+# 3. 存盘即生效，无需改代码
+#
+# ── confidence 三档 ──────────────────────────────────────
+#   official   官方定价页直接抄的，权威
+#   estimate   参照同族/同类模型推算的，会标注「估」
+#   unknown    查不到价格，页面显示「—」而不是 0
+#
+# ── 免费端点 ────────────────────────────────────────────
+# base_url 命中 free_hosts 的请求一律按 0 计（本地跑的不花钱），
+# 但仍统计 token。这类调用不该混进成本数字里。
+
+version: 1
+updated: "2026-10-10"
+
+# ── 真本地推理端点：按 0 元计 ─────────────────────────────
+# 注意：只列「真在本机跑权重」的端点（如 ollama）。
+# 历史上还有 localhost:4000 / :20128 这类 litellm / 聚合路由端口，它们虽然
+# 也监听在本机，但请求被转发到付费模型上，照样花钱 —— 不能算 0。
+# 若哪天本机新增了自建推理端点（如 vllm），再加端口，别把代理误加进来。
+free_hosts:
+  - localhost:11434      # ollama —— 唯一真本地跑权重的端点
+  - 127.0.0.1:11434
+  - 0.0.0.0:11434
+# 下列端口曾记录在本机，但它们是转发到付费模型的代理，不按 0 计。
+# 保留在这仅为提醒别再把它们当本地；判定逻辑不读这一段。
+free_hosts_excluded:
+  - localhost:4000       # litellm：MiniMax-M3 经此转发了 4218 万 token，是真花钱的
+  - localhost:20128      # 聚合路由 all-in-one：同样转发到付费模型
+
+# ── 精确价格 ───────────────────────────────────────────────
+models:
+  deepseek-flash:
+    input: 0.30
+    output: 1.20
+    cache_read: 0.006
+    confidence: official
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    checked: "2026-10-10"
+    peak:
+      input: 0.30
+      output: 1.20
+      cache_read: 0.006
+    off_peak:
+      input: 0.15
+      output: 0.60
+      cache_read: 0.003
+    time_tier: deepseek_peak_offpeak
+    note: >-
+      DeepSeek 自 2026-08-16 起实行峰谷价，峰价为谷价 2 倍。
+      峰时段 = UTC 周一至周五 01:00-04:00 与 06:00-10:00（北京时间 09-12、14-18 点），
+      其余时间（含周末与法定节假日）全为谷价。
+      表里的 input/output/cache_read 填的是**峰价**——宁可高估也不低估账单。
+      若某次调用落在峰时段，引擎会自动取 peak 段价格。
+
+  deepseek-v4-flash:
+    input: 0.30
+    output: 1.20
+    cache_read: 0.006
+    confidence: official
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    checked: "2026-10-10"
+    peak:
+      input: 0.30
+      output: 1.20
+      cache_read: 0.006
+    off_peak:
+      input: 0.15
+      output: 0.60
+      cache_read: 0.003
+    time_tier: deepseek_peak_offpeak
+    note: "旧别名，2026-09-14 起请求由 V4.1-Flash 承接并按 Flash 价计"
+
+  deepseek-v4-pro:
+    input: 1.32
+    output: 3.96
+    cache_read: 0.044
+    confidence: official
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    checked: "2026-10-10"
+    peak:
+      input: 1.32
+      output: 3.96
+      cache_read: 0.044
+    off_peak:
+      input: 0.66
+      output: 1.98
+      cache_read: 0.022
+    time_tier: deepseek_peak_offpeak
+    note: "峰价为谷价 2 倍，同样按峰价填基准值"
+
+  minimax-m3:
+    input: 0.60
+    output: 2.40
+    cache_read: 0.12
+    confidence: official
+    source: "https://platform.minimax.io/docs/guides/pricing-paygo"
+    checked: "2026-10-10"
+    note: >-
+      取划线原价而非当前折扣价。官方长期 5 折（现价 $0.30/$1.20/$0.06），
+      但那是促销价；用原价估算是有意为之：折算的是「按量付费要花多少」，
+      避免折扣取消后成本凭空翻倍。本机走 Token Plan，实际按额度扣，
+      此价仅作等效成本参考。
+      >512k 输入档翻倍（$1.20/$4.80/$0.24），本插件未按档位细分。
+
+  minimax-m3.1-flash-preview:
+    input: 0.60
+    output: 2.40
+    cache_read: 0.12
+    confidence: estimate
+    source: "https://platform.minimax.io/docs/guides/pricing-paygo"
+    checked: "2026-10-10"
+    note: >-
+      MiniMax 尚未公布 M3.1 的 API 定价，暂按 M3 原价估算。
+      M3.1 定位为 Flash（更快/更便宜），真实价大概率 ≤ M3，
+      因此这个估算偏保守（偏高），属安全侧高估。
+      官方一旦公布，改这里即可，aliases 段不用动。
+
+  deepseek-v4-pro-local:
+    input: 1.32
+    output: 3.96
+    cache_read: 0.044
+    confidence: official
+    source: "https://api-docs.deepseek.com/quick_start/pricing"
+    checked: "2026-10-10"
+    hidden: true
+    note: "占位：本机经 litellm 转发，实际按上面各端点的真实模型价计"
+
+# ── 历史价格 ───────────────────────────────────────────────
+# 问题：用「今天的价格」去算「上个月的用量」是错的 —— 中间调过价就算不准。
+# 解决：把每次调价记一条，带 from 生效日。引擎按每次调用的时间戳挑当时那档价。
+#
+# 怎么用：
+#   1. 官方调价后，在 price_history 对应模型下加一段，from 填公告生效日
+#   2. 同一模型可有多段，from 递增；引擎选 from <= 调用时间 的最新一段
+#   3. 该模型在 models: 里的价格 = 最新一段（保持同步，缺 history 时回退用它）
+#
+# 已知的历史调价（官方公告，可回溯核对）：
+#   2026-08-16  DeepSeek 改为峰谷价，峰价为谷价 2 倍
+#   2026-09-10  DeepSeek-V4.1-Flash 上线并降价：谷价 $0.003/$0.15/$0.60
+#   2026-09-14  deepseek-v4-pro 请求改由 V4.1-Flash 承接
+price_history:
+  deepseek-v4-flash:
+    - from: "2026-08-16"
+      until: "2026-09-10"
+      time_tier: deepseek_peak_offpeak
+      peak:
+        input: 0.44
+        output: 1.32
+        cache_read: 0.014
+      off_peak:
+        input: 0.22
+        output: 0.66
+        cache_read: 0.007
+      note: >-
+        这一段实际服务的是 V4-Flash-0731，比 09-10 之后的 V4.1-Flash 贵。
+        峰价 $0.44/$1.32/$0.014，谷价为其一半。
+        （deepseek-flash 这个名字直到 09-10 才切到 V4.1，故这段主要给旧别名用。）
+    - from: "2026-09-10"
+      time_tier: deepseek_peak_offpeak
+      peak:
+        input: 0.30
+        output: 1.20
+        cache_read: 0.006
+      off_peak:
+        input: 0.15
+        output: 0.60
+        cache_read: 0.003
+      note: "V4.1-Flash 上线并降价，峰价 $0.30/$1.20/$0.006，谷价减半"
+
+# ── 第三方中转站：价格随套餐浮动，不估 ──────────────────────
+# poke2api / opencode-go 这类聚合站按月费或倍率计费，单价不稳定，
+# 硬填一个数字反而误导。页面标「中转站」不计入成本。
+relay_providers:
+  - poke2api.com
+  - opencode.ai
+
+# ── 查不到价的模型：不猜，标 unknown ────────────────────────
+unknown_models:
+  all-in-one:
+    note: "本机聚合路由，实际落到哪个模型不固定"
+  qwen3.5:9b:
+    note: "本地 ollama，命中 free_hosts，本就 0"
+
+# ── 别名规则：模型名匹配不上价格表时的兜底 ──────────────────
+# 从上往下第一条命中即生效。用 LLM 维护，改完不用动代码。
+aliases:
+  - match: "^minimax-m3\\.1"
+    use: minimax-m3.1-flash-preview
+    why: "M3.1 Flash 暂按 M3 原价估"
+
+  - match: "^minimax-m3"
+    use: minimax-m3
+    why: "M3 全系（含 -highspeed 等后缀）同价"
+
+  - match: "^deepseek-(chat|reasoner)$"
+    use: deepseek-v4-flash
+    why: "旧别名已由 V4.1-Flash 承接"
+
+  - match: "^gpt-5\\.6"
+    use: null
+    why: "第三方中转站，单价随套餐浮动，不估"

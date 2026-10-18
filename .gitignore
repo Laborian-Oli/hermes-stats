@@ -3,3 +3,13 @@ __pycache__/
 node_modules/
 *.log
 plugin-test.mjs
+plugin-real.mjs
+plugin-smoke.mjs
+PROJECT.md
+
+# 本机运行产物（render-real.mjs 读它渲染真实用量，勿外传）
+/tmp/hs-real.json
+hs-real.html
+
+# hstats 独立环境
+.venv/

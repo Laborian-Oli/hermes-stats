@@ -119,9 +119,13 @@ const fmtTokens = n => (n = n || 0) >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
   : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M'
   : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n)
 // 入参是美元估算值；rate 可显式传入（冒烟测试用），默认取当前汇率
-const fmtCost = (n, rate) => {
+// cost_null 为 true 时显示「—」：没有价格 ≠ 价格是 0，混为一谈就是骗人
+const fmtCost = (n, rate, cost_null) => {
+  if (cost_null || n == null || !Number.isFinite(n)) return '—'
   const v = (n || 0) * (rate != null ? rate : FX.rate)
-  return v >= 1 ? Fx.cn + v.toFixed(2) : v > 0 ? Fx.cn + v.toPrecision(2) : Fx.cn + '0'
+  // 一律两位小数：toPrecision 会吐出一长串有效数字（¥0.000071）没法看
+  if (v >= 0.01) return Fx.cn + v.toFixed(2)
+  return v > 0 ? Fx.cn + v.toFixed(4) : Fx.cn + '0.00'
 }
 const fmtInt = n => (n || 0).toLocaleString()
 const fmtDay = ts => ts ? new Date(ts * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '—'
@@ -315,23 +319,49 @@ function StatPage({ rest }) {
   const totalTokens = stats.totals ? (stats.totals.total_input || 0) + (stats.totals.total_output || 0) : 0
   const hourMax = Math.max(1, ...a.by_hour.map(h => h.count))
 
+  /* — 价格信息：优先用后端按价格表重算的结果，没有才退回旧的 estimated_cost — */
+    const pr = stats.pricing || null
+    const coverage = pr ? pr.coverage : null
+    // 覆盖率不足 100% 时，成本是「已定价部分」的真实值 + 未定价部分的未知，
+    // 因此标出来，而不是让人以为这就是全部。
+    const costPartial = coverage != null && coverage < 0.999
+    const unpricedList = pr ? (pr.unpriced || []).filter(u => u.tokens > 0) : []
+    const unpricedNames = unpricedList.map(u => u.model)
+    const unpricedTokens = unpricedList.reduce((s, u) => s + u.tokens, 0)
+    const costSub = pr
+      ? (costPartial
+          ? `已计 ${unpricedList.length} 个模型 · ${unpricedNames.slice(0, 2).join('、')}${unpricedNames.length > 2 ? ' 等' : ''} 未定价`
+          : '按官方 API 单价估算')
+      : (o.unknown_cost_sessions ? `${o.unknown_cost_sessions} 会话无定价` : null)
+    // 未定价部分占比大时，把已计金额与未定价量并排说清，不让人误读成全量
+    const costTitle = pr ? `成本（¥）· 已计 ${(coverage * 100).toFixed(0)}%` : '成本（¥）'
+
   /* — 预构建数据（保持每个 jsx 调用只有一层 children） — */
   const overviewCards = [
     jsx(StatCard, { key: 'a', label: '会话', value: fmtInt(o.total_sessions), sub: o.user_messages ? `用户消息 ${fmtInt(o.user_messages)}` : null }),
     jsx(StatCard, { key: 'b', label: '消息', value: fmtInt(o.total_messages), sub: `平均 ${(o.avg_messages_per_session || 0).toFixed(1)}/会话` }),
     jsx(StatCard, { key: 'c', label: '总 Tokens', value: fmtTokens((o.total_input_tokens || 0) + (o.total_output_tokens || 0)), sub: `缓存读 ${fmtTokens(o.total_cache_read_tokens || 0)}` }),
-    jsx(StatCard, { key: 'd', label: '成本（¥）', value: fmtCost(o.estimated_cost), sub: o.unknown_cost_sessions ? `${o.unknown_cost_sessions} 会话无定价` : null }),
+    jsx(StatCard, { key: 'd', label: costTitle, value: fmtCost(pr ? pr.cost_usd : o.estimated_cost, null, false), sub: costSub }),
     jsx(StatCard, { key: 'e', label: '工具调用', value: fmtInt(o.total_tool_calls), sub: stats.totals && stats.totals.total_api_calls != null ? `API 调用 ${fmtInt(stats.totals.total_api_calls)}` : null }),
     jsx(StatCard, { key: 'f', label: '活跃时长', value: (o.total_hours || 0).toFixed(1) + 'h', sub: a ? `活跃 ${a.active_days} 天 · 最长连续 ${a.max_streak} 天` : null }),
   ]
   const modelTokens = m => (m.input_tokens || 0) + (m.output_tokens || 0) + (m.cache_read_tokens || 0) + (m.cache_write_tokens || 0)
   const models = (stats.by_model || []).map(m => ({ label: m.model, value: modelTokens(m) }))
-  const modelRows = (stats.by_model || []).map((m, i) => jsx('tr', { key: i, children: [
-    jsx('td', { key: 'n', children: m.model }),
-    jsx('td', { key: 't', children: fmtTokens(modelTokens(m)) }),
-    jsx('td', { key: 'c', children: fmtCost(m.estimated_cost || 0) }),
-    jsx('td', { key: 's', children: fmtInt(m.sessions || 0) }),
-  ]}))
+  // 模型成本表改用重算值；未定价模型显示「—」
+  const pricedByModel = pr ? new Map((pr.by_model || []).map(m => [m.model, m])) : null
+  const modelRows = (stats.by_model || []).map((m, i) => {
+    const hit = pricedByModel ? pricedByModel.get(m.model) : null
+    const costUsd = hit ? hit.cost_usd : m.estimated_cost
+    const priced = hit ? hit.status !== 'unknown' && hit.status !== 'relay' : m.estimated_cost > 0
+    const badge = hit && (hit.status === 'estimate' || hit.status === 'unknown' || hit.status === 'relay' || hit.status === 'free')
+      ? ` ${hit.status_label}` : ''
+    return jsx('tr', { key: i, children: [
+      jsx('td', { key: 'n', children: m.model + badge }),
+      jsx('td', { key: 't', children: fmtTokens(modelTokens(m)) }),
+      jsx('td', { key: 'c', children: fmtCost(costUsd, null, !priced) }),
+      jsx('td', { key: 's', children: fmtInt(m.sessions || 0) }),
+    ]})
+  })
   const platforms = (stats.platforms || []).map(p => ({ label: p.platform, value: (p.input_tokens || 0) + (p.output_tokens || 0) }))
   const toolRows = (stats.tools || []).slice(0, 10).map(t => ({ label: t.tool, value: t.count, pct: t.percentage }))
   const skillRows = (stats.skills.top_skills || []).slice(0, 10).map((sk, i) => jsx('tr', { key: i, children: [
@@ -372,6 +402,46 @@ function StatPage({ rest }) {
     jsx(StatCard, { key: 's', label: '历史会话', value: fmtInt(c.sessions_total) }),
     jsx(StatCard, { key: 'm', label: 'Memory', value: fmtTokens((c.memory_chars && c.memory_chars['MEMORY.md']) || 0) + ' 字符', sub: `USER.md ${fmtTokens((c.memory_chars && c.memory_chars['USER.md']) || 0)}` }),
   ]
+
+  /* — 价格来源表：让「钱是怎么算出来的」可查、可改 — */
+  const tierLabel = e => e.time_tier === 'deepseek_peak_offpeak' ? '峰谷价' : null
+  const priceCell = (v, e) => {
+    if (e && e.time_tier === 'deepseek_peak_offpeak' && e.peak && e.off_peak) {
+      // v 是字段名（input/output/cache_read），不是值
+      const pk = e.peak[v], off = e.off_peak[v]
+      if (pk == null && off == null) return '—'
+      return jsx('span', { title: `峰 $${pk} / 谷 $${off}`, children: pk === off ? '$' + pk : `$${pk}–${off}` })
+    }
+    return e[v] != null ? '$' + e[v] : '—'
+  }
+  const pricingRows = pr && pr.table ? (pr.table.entries || []).map((e, i) => jsx('tr', { key: i, children: [
+    jsx('td', { key: 'k', children: [e.key, tierLabel(e) ? jsx('span', { key: 'tt', className: 'hs-tag', children: ' ' + tierLabel(e) }) : null] }),
+    jsx('td', { key: 'i', children: priceCell('input', e) }),
+    jsx('td', { key: 'o', children: priceCell('output', e) }),
+    jsx('td', { key: 'r', children: priceCell('cache_read', e) }),
+    jsx('td', { key: 'c', children: (pr.table.labels && pr.table.labels[e.confidence]) || e.confidence }),
+    jsx('td', { key: 'd', children: e.checked || '—' }),
+  ]})) : []
+  const hist = pr && pr.table && pr.table.price_history ? pr.table.price_history : null
+  const histKeys = hist ? Object.keys(hist).filter(k => (hist[k] || []).length) : []
+  const histRows = histKeys.map(k => jsx('tr', { key: k, children: [
+    jsx('td', { key: 'k', children: k }),
+    jsx('td', { key: 'd', children: hist[k].map(e => `${e.from || '?'} ~ ${e.until || '至今'}`).join(' ; ') }),
+    jsx('td', { key: 'n', colSpan: 4, children: hist[k].length ? (hist[k][hist[k].length - 1].note || '—') : '—' }),
+  ]}))
+  const pricingSection = pr && pr.table && (pr.table.entries || []).length ? jsx('div', { key: 'sp', className: 'hs-sec', children: [
+    jsx('div', { key: 't', className: 'hs-sec-title', children: ['价格来源', jsx('span', { key: 'v', className: 'hs-tag', children: `price_table.yaml v${pr.table.version} · ${pr.table.updated || ''}` })] }),
+    jsx(Card, { key: 'c', children: jsx('div', { className: 'hs-note', children: '单价单位 USD / 每百万 token。取官方划线原价而非促销价，折算的是「按量付费要花多少」。改价只需编辑插件目录下的 price_table.yaml，无需改代码。' }) }),
+    jsx('table', { key: 'tb', className: 'hs-table', children: [
+      jsx('thead', { key: 'h', children: jsx('tr', { children: [HeadRow(['模型', '输入', '输出', '缓存读', '口径', '核对于'])] }) }),
+      jsx('tbody', { key: 'b', children: pricingRows }),
+    ] }),
+    histRows.length ? jsx('div', { key: 'hh', className: 'hs-sec-title', style: { marginTop: 14 }, children: '历史调价（按调用时间取当时那档价）' }) : null,
+    histRows.length ? jsx('table', { key: 'ht', className: 'hs-table', children: [
+      jsx('thead', { key: 'hh2', children: jsx('tr', { children: [HeadRow(['模型', '生效区间', '说明'])] }) }),
+      jsx('tbody', { key: 'hb', children: histRows }),
+    ] }) : null,
+  ]}) : null
 
   /* — 组装页面（每个 jsx 调用最多一层 children） — */
   const head = jsx('div', { key: 'h', className: 'hs-head', children: [
@@ -439,10 +509,15 @@ function StatPage({ rest }) {
     jsx('div', { key: 'g', className: 'hs-grid', children: sysCards }),
   ]})
   const note = jsx('div', { key: 'n', className: 'hs-note', children: `${t('note')} 成本按人民币展示 · FX ${fxNoteText()}` })
+  // 构建标识：确认「改动到底有没有生效」，省得反复重启猜
+  const buildTag = (stats.build && stats.build.id)
+    ? jsx('span', { key: 'bt', className: 'hs-tag', title: `后端 ${stats.build.module_file || ''}\n进程 PID ${stats.build.pid}`, children: `build ${stats.build.id}` })
+    : null
+  const buildNote = buildTag ? jsx('div', { key: 'bn', className: 'hs-note', children: [note, ' ', buildTag] }) : note
 
   return jsx('div', { className: 'hs-root', children: [
     jsx('style', { key: 's', children: STYLE }),
-    head, sec1, sec2, sec3, sec4, sec5, sec6, sec7, sec8, note,
+    head, sec1, sec2, sec3, sec4, sec5, sec6, sec7, sec8, pricingSection, buildNote,
   ]})
   } catch (e) {
     console.error('[hs-page] render error:', (e && e.message) || e, (e && e.stack) || '')
@@ -453,14 +528,27 @@ function StatPage({ rest }) {
 /* ---------------- statusbar chip ---------------- */
 
 /* chip 文案：纯函数，便于冒烟测试用真实后端数据断言。
-   两个坑：① /stats 的 totals 键是 total_estimated_cost（estimated_cost 只出现在 overview/by_model/daily），
+   三个坑：① /stats 的 totals 键是 total_estimated_cost（estimated_cost 只出现在 overview/by_model/daily），
    取错键会让成本恒显示 0；② 展示货币是人民币，但 totals 里的钱是美元口径，换算汇率来自模块级 FX
-   （由 applyFx 用 /stats 的 fx 字段刷新，测试时可显式传 rate）。 */
-function todayChipLabel(totals, t, rate) {
+   （由 applyFx 用 /stats 的 fx 字段刷新，测试时可显式传 rate）；
+   ③ totals.total_estimated_cost 是 Hermes 自记的字段，对 MiniMax / gpt-5.6 这类没登记价格的模型恒为 0，
+   所以优先用 pricing.cost_usd（后端按 price_table.yaml 重算过的）。 */
+function todayChipLabel(totals, t, rate, pricing) {
   const o = totals || {}
-  const tk = (o.total_input || 0) + (o.total_output || 0)
-  const cost = o.total_estimated_cost != null ? o.total_estimated_cost : o.estimated_cost
-  return `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(cost, rate)}`
+  // 口径：与页面 KPI 卡一致，含辅助任务（压缩/审批/视觉/后台复审）。
+  // totals 只含主任务，直接用它会少算 15% 左右；overview 才含辅助。
+  // 后端已把含辅助的总量放到 totals.total_input_tokens_all，
+  // 老版本没有该字段时退回主任务口径。
+  const hasAll = Number.isFinite(o.total_input_tokens_all) && Number.isFinite(o.total_output_tokens_all)
+  const tk = hasAll
+    ? o.total_input_tokens_all + o.total_output_tokens_all
+    : (o.total_input || 0) + (o.total_output || 0)
+  const cost = pricing && Number.isFinite(pricing.cost_usd)
+    ? pricing.cost_usd
+    : (o.total_estimated_cost != null ? o.total_estimated_cost : o.estimated_cost)
+  // 全部 token 都没价格时显示「—」，别拿 0 冒充
+  const noPrice = pricing ? pricing.coverage < 0.999 : (o.total_estimated_cost === 0 && tk > 0)
+  return `⚡ ${t('today')} ${fmtTokens(tk)} · ${fmtCost(cost, rate, noPrice && !(pricing && pricing.cost_usd > 0))}`
 }
 
 function TodayChip({ rest }) {
@@ -468,7 +556,7 @@ function TodayChip({ rest }) {
   const s = useData(() => rest('/stats?days=1'), [], 5 * 60 * 1000)
   let label = t('loading')
   if (s.isError) label = t('error')
-  else if (s.data) { applyFx(s.data); label = todayChipLabel(s.data.totals, t) }
+  else if (s.data) { applyFx(s.data); label = todayChipLabel(s.data.totals, t, null, s.data.pricing) }
   return jsx('button', { className: 'hs-chip', onClick: () => host.navigate('/stats'), title: t('palette'), children: [label] })
 }
 
